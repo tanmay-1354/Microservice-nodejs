@@ -2,8 +2,9 @@ name: Deploy Microservice to ECS
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch:   # 👈 manual trigger added
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   id-token: write
@@ -14,37 +15,60 @@ jobs:
     runs-on: [self-hosted, linux, x64, devops]
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    # -----------------------------
+    # 1. Checkout source code
+    # -----------------------------
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      - name: Configure AWS credentials using OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
+    # -----------------------------
+    # 2. Configure AWS credentials (OIDC)
+    # -----------------------------
+    - name: Configure AWS credentials using OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+        aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
+    # -----------------------------
+    # 3. Login to Amazon ECR
+    # -----------------------------
+    - name: Login to Amazon ECR
+      uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push Docker image
-        env:
-          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          ECR_REPO_NAME: ${{ secrets.ECR_REPO_NAME }}
-        run: |
-          IMAGE_TAG=${GITHUB_SHA}
-          docker build -t $ECR_REPO_NAME:$IMAGE_TAG .
-          docker tag $ECR_REPO_NAME:$IMAGE_TAG \
-            $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG
-          docker push \
-            $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG
+    # -----------------------------
+    # 4. Build & Push Docker image
+    # IMPORTANT: Dockerfile is inside "microservice/" folder
+    # -----------------------------
+    - name: Build and push Docker image
+      working-directory: microservice
+      env:
+        AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        AWS_REGION: ${{ secrets.AWS_REGION }}
+        ECR_REPO_NAME: ${{ secrets.ECR_REPO_NAME }}
+      run: |
+        IMAGE_TAG=${GITHUB_SHA}
 
-      - name: Force new ECS deployment
-        env:
-          ECS_CLUSTER_NAME: ${{ secrets.ECS_CLUSTER_NAME }}
-          ECS_SERVICE_NAME: ${{ secrets.ECS_SERVICE_NAME }}
-        run: |
-          aws ecs update-service \
-            --cluster $ECS_CLUSTER_NAME \
-            --service $ECS_SERVICE_NAME \
-            --force-new-deployment
+        echo "Building Docker image..."
+        docker build -t $ECR_REPO_NAME:$IMAGE_TAG .
+
+        echo "Tagging image..."
+        docker tag $ECR_REPO_NAME:$IMAGE_TAG \
+          $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG
+
+        echo "Pushing image to ECR..."
+        docker push \
+          $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG
+
+    # -----------------------------
+    # 5. Force ECS rolling deployment
+    # -----------------------------
+    - name: Deploy to ECS (force new deployment)
+      env:
+        ECS_CLUSTER_NAME: ${{ secrets.ECS_CLUSTER_NAME }}
+        ECS_SERVICE_NAME: ${{ secrets.ECS_SERVICE_NAME }}
+      run: |
+        aws ecs update-service \
+          --cluster $ECS_CLUSTER_NAME \
+          --service $ECS_SERVICE_NAME \
+          --force-new-deployment
