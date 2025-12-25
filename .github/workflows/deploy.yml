@@ -3,6 +3,7 @@ name: Deploy Microservice to ECS
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:   # 👈 manual trigger added
 
 permissions:
   id-token: write
