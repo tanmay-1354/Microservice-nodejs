@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   deploy:
-    runs-on: [self-hosted, linux, x64, devops]
+    runs-on: [self-hosted, linux]
 
     env:
       AWS_REGION: ap-south-1
