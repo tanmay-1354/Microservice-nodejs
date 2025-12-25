@@ -1,4 +1,4 @@
-name: Deploy Microservice to ECS (Immutable Tags)
+name: Deploy Microservice to ECS
 
 on:
   push:
@@ -15,96 +15,76 @@ jobs:
 
     env:
       AWS_REGION: ap-south-1
-      AWS_ACCOUNT_ID: "506115905612"
-      ECR_REPO_NAME: devops-sam-microservice
-      ECS_CLUSTER_NAME: devops-sam-ecs-cluster
-      ECS_SERVICE_NAME: devops-sam-microservice
-      ECS_TASK_FAMILY: devops-sam-microservice
+      AWS_ACCOUNT_ID: 506115905612
+
+      ECR_REPO: devops-sam-microservice
+      ECR_URI: 506115905612.dkr.ecr.ap-south-1.amazonaws.com/devops-sam-microservice
+
+      ECS_CLUSTER: devops-sam-ecs-cluster
+      ECS_SERVICE: devops-sam-microservice
+      TASK_FAMILY: devops-sam-microservice
+      EXECUTION_ROLE_ARN: arn:aws:iam::506115905612:role/devops-sam-ecs-execution-role
 
     steps:
-    # ----------------------------
-    # 1. Checkout code
-    # ----------------------------
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      # 1️⃣ Checkout code
+      - name: Checkout source
+        uses: actions/checkout@v4
 
-    # ----------------------------
-    # 2. AWS auth via OIDC
-    # ----------------------------
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-        aws-region: ap-south-1
+      # 2️⃣ Configure AWS (OIDC – NO KEYS)
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ap-south-1
 
-    # ----------------------------
-    # 3. Login to ECR
-    # ----------------------------
-    - name: Login to Amazon ECR
-      run: |
-        aws ecr get-login-password --region ap-south-1 \
-        | sudo docker login \
-          --username AWS \
-          --password-stdin \
-          506115905612.dkr.ecr.ap-south-1.amazonaws.com
+      # 3️⃣ Login to ECR
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region $AWS_REGION \
+          | sudo docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
 
-    # ----------------------------
-    # 4. Build & Push Image
-    # ----------------------------
-    - name: Build and push Docker image
-      run: |
-        set -e
+      # 4️⃣ Build & Push Docker Image
+      - name: Build and Push Docker Image
+        run: |
+          IMAGE_TAG=${GITHUB_SHA}
+          IMAGE_URI=$ECR_URI:$IMAGE_TAG
 
-        IMAGE_TAG=${GITHUB_SHA}
-        IMAGE_URI=506115905612.dkr.ecr.ap-south-1.amazonaws.com/devops-sam-microservice:${IMAGE_TAG}
+          sudo docker build -t $IMAGE_URI .
+          sudo docker push $IMAGE_URI
 
-        echo "Building image: $IMAGE_URI"
-        sudo docker build -t $IMAGE_URI .
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
 
-        echo "Pushing image to ECR"
-        sudo docker push $IMAGE_URI
+      # 5️⃣ Register NEW ECS Task Definition
+      - name: Register new Task Definition
+        run: |
+          cat > task-def.json <<EOF
+          {
+            "family": "$TASK_FAMILY",
+            "networkMode": "awsvpc",
+            "requiresCompatibilities": ["FARGATE"],
+            "cpu": "256",
+            "memory": "512",
+            "executionRoleArn": "$EXECUTION_ROLE_ARN",
+            "containerDefinitions": [
+              {
+                "name": "microservice",
+                "image": "$IMAGE_URI",
+                "essential": true,
+                "portMappings": [
+                  { "containerPort": 3000 }
+                ]
+              }
+            ]
+          }
+          EOF
 
-        echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+          aws ecs register-task-definition \
+            --cli-input-json file://task-def.json
 
-    # ----------------------------
-    # 5. Register NEW task definition
-    # ----------------------------
-    - name: Register new ECS task definition
-      run: |
-        cat > task-def.json <<EOF
-        {
-          "family": "${ECS_TASK_FAMILY}",
-          "networkMode": "awsvpc",
-          "requiresCompatibilities": ["FARGATE"],
-          "cpu": "256",
-          "memory": "512",
-          "executionRoleArn": "arn:aws:iam::506115905612:role/devops-sam-ecs-execution-role",
-          "taskRoleArn": "arn:aws:iam::506115905612:role/devops-sam-ecs-task-role",
-          "containerDefinitions": [
-            {
-              "name": "microservice",
-              "image": "${IMAGE_URI}",
-              "portMappings": [
-                {
-                  "containerPort": 3000,
-                  "protocol": "tcp"
-                }
-              ],
-              "essential": true
-            }
-          ]
-        }
-        EOF
-
-        aws ecs register-task-definition \
-          --cli-input-json file://task-def.json
-
-    # ----------------------------
-    # 6. Update ECS service
-    # ----------------------------
-    - name: Deploy new task definition
-      run: |
-        aws ecs update-service \
-          --cluster ${ECS_CLUSTER_NAME} \
-          --service ${ECS_SERVICE_NAME} \
-          --task-definition ${ECS_TASK_FAMILY}
+      # 6️⃣ Update ECS Service (Rolling Deploy)
+      - name: Deploy to ECS
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --task-definition $TASK_FAMILY
