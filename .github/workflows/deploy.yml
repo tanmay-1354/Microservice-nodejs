@@ -1,4 +1,4 @@
-name: Deploy Microservice to ECS
+name: Deploy Microservice to ECS (Immutable Tags)
 
 on:
   push:
@@ -17,28 +17,29 @@ jobs:
       AWS_REGION: ap-south-1
       AWS_ACCOUNT_ID: "506115905612"
       ECR_REPO_NAME: devops-sam-microservice
-      ECR_REGISTRY: 506115905612.dkr.ecr.ap-south-1.amazonaws.com
-      ECR_IMAGE_URI: 506115905612.dkr.ecr.ap-south-1.amazonaws.com/devops-sam-microservice
+      ECS_CLUSTER_NAME: devops-sam-ecs-cluster
+      ECS_SERVICE_NAME: devops-sam-microservice
+      ECS_TASK_FAMILY: devops-sam-microservice
 
     steps:
-    # -----------------------------
+    # ----------------------------
     # 1. Checkout code
-    # -----------------------------
+    # ----------------------------
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # -----------------------------
-    # 2. Configure AWS credentials (OIDC)
-    # -----------------------------
-    - name: Configure AWS credentials using OIDC
+    # ----------------------------
+    # 2. AWS auth via OIDC
+    # ----------------------------
+    - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
         role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
         aws-region: ap-south-1
 
-    # -----------------------------
-    # 3. Login to ECR (EXACT REGISTRY)
-    # -----------------------------
+    # ----------------------------
+    # 3. Login to ECR
+    # ----------------------------
     - name: Login to Amazon ECR
       run: |
         aws ecr get-login-password --region ap-south-1 \
@@ -47,28 +48,63 @@ jobs:
           --password-stdin \
           506115905612.dkr.ecr.ap-south-1.amazonaws.com
 
-    # -----------------------------
-    # 4. Build & Push Docker Image
-    # -----------------------------
+    # ----------------------------
+    # 4. Build & Push Image
+    # ----------------------------
     - name: Build and push Docker image
       run: |
         set -e
 
         IMAGE_TAG=${GITHUB_SHA}
-        FULL_IMAGE_URI=${ECR_IMAGE_URI}:${IMAGE_TAG}
+        IMAGE_URI=506115905612.dkr.ecr.ap-south-1.amazonaws.com/devops-sam-microservice:${IMAGE_TAG}
 
-        echo "Building image: $FULL_IMAGE_URI"
-        sudo docker build -t $FULL_IMAGE_URI .
+        echo "Building image: $IMAGE_URI"
+        sudo docker build -t $IMAGE_URI .
 
         echo "Pushing image to ECR"
-        sudo docker push $FULL_IMAGE_URI
+        sudo docker push $IMAGE_URI
 
-    # -----------------------------
-    # 5. Force ECS rolling deployment
-    # -----------------------------
-    - name: Deploy to ECS
+        echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+
+    # ----------------------------
+    # 5. Register NEW task definition
+    # ----------------------------
+    - name: Register new ECS task definition
+      run: |
+        cat > task-def.json <<EOF
+        {
+          "family": "${ECS_TASK_FAMILY}",
+          "networkMode": "awsvpc",
+          "requiresCompatibilities": ["FARGATE"],
+          "cpu": "256",
+          "memory": "512",
+          "executionRoleArn": "arn:aws:iam::506115905612:role/devops-sam-ecs-execution-role",
+          "taskRoleArn": "arn:aws:iam::506115905612:role/devops-sam-ecs-task-role",
+          "containerDefinitions": [
+            {
+              "name": "microservice",
+              "image": "${IMAGE_URI}",
+              "portMappings": [
+                {
+                  "containerPort": 3000,
+                  "protocol": "tcp"
+                }
+              ],
+              "essential": true
+            }
+          ]
+        }
+        EOF
+
+        aws ecs register-task-definition \
+          --cli-input-json file://task-def.json
+
+    # ----------------------------
+    # 6. Update ECS service
+    # ----------------------------
+    - name: Deploy new task definition
       run: |
         aws ecs update-service \
-          --cluster ${{ secrets.ECS_CLUSTER_NAME }} \
-          --service ${{ secrets.ECS_SERVICE_NAME }} \
-          --force-new-deployment
+          --cluster ${ECS_CLUSTER_NAME} \
+          --service ${ECS_SERVICE_NAME} \
+          --task-definition ${ECS_TASK_FAMILY}
